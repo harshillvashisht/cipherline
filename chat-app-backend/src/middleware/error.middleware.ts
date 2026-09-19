@@ -27,10 +27,12 @@ export const errormiddleware = (err: unknown, req: Request, res: Response, next:
     else{
         const message = "internal server error";
         const statusCode = 500;
+        console.log(err);
 
         return res.status(statusCode).json({
             success: false,
             message: message
+
         })
     }
 
