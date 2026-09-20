@@ -4,10 +4,19 @@ import { initializeSocket } from "./sockets/socket";
 
 const server = http.createServer(app);
 
-initializeSocket(server);
-
 const PORT = process.env.PORT || 3000;
 
-server.listen(PORT , () => {
-    console.log(`Server is running on port ${PORT}`);
-})
+const startServer = async () => {
+    try {
+        await initializeSocket(server);
+
+        server.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error);
+        process.exit(1);
+    }
+};
+
+startServer();

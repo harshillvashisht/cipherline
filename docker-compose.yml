@@ -1,0 +1,58 @@
+x-backend: &backend
+  build:
+    context: ./chat-app-backend
+  env_file:
+    - ./chat-app-backend/.env
+  # Same Neon ENOTFOUND workaround as your `docker run --dns 8.8.8.8`, per service.
+  dns:
+    - 8.8.8.8
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  # No `ports:` on purpose - only Nginx is reachable from the host.
+
+services:
+  backend1:
+    <<: *backend
+    environment:
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: backend1
+
+  backend2:
+    <<: *backend
+    environment:
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: backend2
+
+  backend3:
+    <<: *backend
+    environment:
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      INSTANCE_ID: backend3
+
+  redis:
+    image: redis:7-alpine
+    # Pub/sub only: no RDB snapshots, no AOF. Nothing here is worth persisting.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend1
+      - backend2
+      - backend3
+    restart: unless-stopped

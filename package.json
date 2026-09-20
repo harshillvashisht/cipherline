@@ -1,6 +1,8 @@
 {
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "chat-app-backend": "file:chat-app-backend",
+    "redis": "^6.2.1",
     "socket.io-client": "^4.8.3",
     "zod": "^4.4.3"
   }

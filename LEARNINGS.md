@@ -2445,3 +2445,111 @@ DB write → DB read → HTTP response → frontend decrypt — rather than
 assuming any one layer was correct because it "looked right" in isolation.
 Both real bugs today were only found this way; neither was visible from
 reading any single file on its own.
+
+# 2026-09-20
+
+## Scaling a realtime backend: multiple instances, Redis, Nginx, DB connection pooling
+
+## 1. Why database connections are the real scaling limit
+
+- Each Postgres connection is a separate OS process on the server, so
+  Postgres enforces a hard `max_connections`.
+- Adding backend containers is easy; the database is the part that does not
+  scale out by adding more copies. Every new instance multiplies the
+  connections hitting it.
+- Neon's free compute allows about 100 usable connections (7 are reserved
+  for the superuser).
+- Failure mode: at some instance count you hit "too many connections" and
+  every instance fails at once.
+
+## 2. Prisma pool sizing
+
+- Default pool per Prisma client: `num_cpus * 2 + 1` connections.
+- Docker Desktop on Windows usually exposes all logical CPUs to
+  containers, so 3 instances on a 16-thread machine could mean ~99
+  connections, right at the limit.
+- `connection_limit=N` in the URL caps it explicitly, independent of CPU count.
+
+## 3. Pooled vs direct connections (PgBouncer)
+
+- Neon's pooled endpoint is the same database with `-pooler` added to the
+  endpoint hostname. It routes through PgBouncer, which multiplexes many
+  client connections onto fewer real Postgres connections.
+- PgBouncer in **transaction mode** does not support session-level state
+  (`SET`, `LISTEN/NOTIFY`, temp tables, session advisory locks). That is why
+  migrations use a separate `DIRECT_URL`.
+- `pgbouncer=true` tells Prisma to avoid patterns that break under
+  transaction pooling (prepared statement handling).
+- Rule: app traffic goes through the pooler, migrations and admin tasks go
+  direct.
+- What this proves: a predictable, bounded DB footprint (13 connections
+  measured). It does not prove speed or load survival. That needs a load
+  test.
+
+## 4. Socket.IO across multiple instances
+
+- Rooms and socket state live in each process's memory. Without help, a
+  message emitted on instance A never reaches a user connected to instance B.
+- The Redis adapter fixes this with pub/sub: emits are published to Redis
+  and every instance forwards them to its own local sockets. Existing
+  `io.to(room).emit(...)` code works unchanged.
+- Redis is used for pub/sub only here, so no persistence is needed.
+
+## 5. Sticky sessions vs WebSocket-only transport
+
+- Socket.IO's default starts with HTTP long-polling, and the handshake spans
+  several requests. Under round-robin without sticky sessions, those
+  requests hit different instances, producing intermittent 400 errors.
+- Forcing `transports: ["websocket"]` on the client means a single
+  long-lived connection, so no stickiness is needed.
+
+## 6. Nginx as a WebSocket-aware load balancer
+
+- Needs `proxy_http_version 1.1` and the `Upgrade` / `Connection` headers
+  forwarded, or WebSocket upgrades fail.
+- A `map` on `$http_upgrade` sets `Connection: upgrade` only for upgrade
+  requests.
+- `proxy_read_timeout` defaults to 60s and would kill idle sockets, so it is
+  raised.
+- An `upstream` block with service names works because Docker Compose gives
+  containers DNS names on the shared network.
+
+## 7. Docker and Compose details
+
+- `npm ci` layer caching: if `package.json` and the lockfile did not change,
+  the install step is cached. Adding an import without installing the
+  package fails at `tsc`, not at install.
+- `npm ci` requires the lockfile to match `package.json`, so commit lockfile
+  changes.
+- YAML anchors (`x-backend: &backend` + `<<: *backend`) avoid repeating
+  service config.
+- `env_file` loads variables from a file; `environment:` entries override it.
+- `healthcheck` + `depends_on: condition: service_healthy` makes backends wait
+  for Redis to be ready.
+- Containers on this machine could not resolve the Neon hostname without
+  `dns: 8.8.8.8`. Root cause still not investigated (open question).
+
+## 8. How to verify distributed behavior
+
+- Log an `INSTANCE_ID` on socket connect so you can see which instance handled
+  each user.
+- `redis-cli pubsub channels` shows `socket.io#...` channels when the
+  adapter is live.
+- A test that can fail: remove the adapter and confirm cross-instance
+  messages stop arriving. If they still arrive, both users were on the same
+  instance and the test proved nothing.
+- Failover: stopping one backend while users are connected should trigger
+  client reconnection to another instance.
+
+## 9. Engineering judgement
+
+- A config change is a design decision, not a result, until you measure it.
+  Do not present "used a pooler" as an outcome without a before/after
+  number.
+- Only claim features that exist in the repo. Unbuilt items go under
+  "known limitations".
+
+## Open questions
+
+- Why containers fail to resolve the Neon hostname without a custom DNS.
+- Actual behavior under load (not measured yet).

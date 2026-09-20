@@ -1682,3 +1682,72 @@ Confirmed the new UI is a genuine upgrade over the old plain blue-and-white look
 Investigated an apparent "key regenerates on login" issue seen on the deployed site vs localhost. Root-caused as expected, non-bug behavior: IndexedDB is origin-scoped, so localhost and the Vercel domain are separate origins with entirely separate key-pair storage — not a real regeneration bug. Confirmed keys persist correctly across refreshes on the deployed site itself.
 
 Chat App V2 feature scope is now functionally complete. Remaining before calling V2 fully done: tag current main commit as stable-v2, disable auto-deploy on Render and Vercel, then start the Redis/multi-instance-scaling branch (final phase, deliberately kept off main/prod given free-tier hosting constraints).
+
+# Day 11 -- Redis / multi-instance scaling (final phase of V2)
+
+## Summary
+
+Took the backend from "one Dockerized instance working" to a multi-instance
+setup: 3 backend containers behind Nginx, Socket.IO synced through Redis, and
+database connections capped through Neon's pooler. Cross-instance messaging
+was tested end to end and works.
+
+## What got done
+
+- Smoke-tested the Dockerized backend against the frontend (closes step 2).
+- Wrote `docker-compose.yml`: 3 backend services, Redis, Nginx.
+- Wrote `nginx.conf`: round-robin upstream with WebSocket upgrade support.
+- Wired the Socket.IO Redis adapter into `socket.ts`.
+- Switched the app to Neon's pooled endpoint with an explicit pool cap, and
+  added a separate direct URL for migrations.
+- Verified cross-instance delivery: two users connected to different
+  instances exchange messages, receipts and sidebar previews correctly.
+- Measured DB connections with all three instances up: **13**.
+
+## Decisions made (and why)
+
+| Decision | Reason |
+|---|---|
+| 3 explicit backend services instead of `deploy.replicas: 3` | Each gets its own `INSTANCE_ID`, so logs show which instance served which user. Replicas would hide that. |
+| No host ports on backends; only Nginx exposes 8080 | Traffic must go through the load balancer, otherwise the test proves nothing. |
+| Redis used for pub/sub only, no persistence | It carries transient socket events. Nothing in it is worth saving. |
+| Nginx round-robin, no sticky sessions | Clients use WebSocket-only transport, so no HTTP long-polling session needs to stay on one instance. |
+| Frontend `transports: ["websocket"]` | Socket.IO's default long-polling handshake breaks under round-robin without sticky sessions. |
+| `dns: 8.8.8.8` on each backend service | Same workaround as the earlier `docker run --dns` fix for Neon hostname resolution. |
+| Frontend stays outside Docker, points at `localhost:8080` | This phase is backend/infra only. |
+| Full pooled Neon setup, not just a `connection_limit` cap | Bounded DB footprint by design, plus the direct/pooled split is the standard production pattern. |
+| `DATABASE_URL` pooled + `pgbouncer=true` + `connection_limit=5`; `DIRECT_URL` for migrations | Max 3 x 5 = 15 client connections; migrations need session features the pooler doesn't support. |
+| Prisma 6.19.3 `directUrl` datasource setup | Supported as written on this version. |
+| No self-hosted PgBouncer | Neon's built-in pooler already does the job. |
+| Skipped rate limiting | Out of scope for this phase (decided earlier). |
+| Skipped the load-test reproduction of the direct-connection failure | Optional, and time is limited with midterms. Noted as a design decision, not a measured result. |
+
+## Problems hit and fixes
+
+- **Build failed: `Cannot find module '@socket.io/redis-adapter'` and `'redis'`.**
+  Root cause: the imports existed in `socket.ts` but the packages were never
+  installed, so `npm ci` (cached) never pulled them in. Fix:
+  `npm install @socket.io/redis-adapter redis` in `backend/`, and commit the
+  updated lockfile (`npm ci` fails if it's out of sync).
+- **Discovered `DATABASE_URL` was the direct Neon string** (no `-pooler` in
+  the hostname) with no `connection_limit`, so each container would open
+  Prisma's default pool of `CPUs * 2 + 1` connections.
+
+## Verification
+
+- Two users on different instances: messages arrive live across instances.
+- "Seen" receipts and sidebar previews update on both sides.
+- Connection count in `pg_stat_activity` with 3 instances running: 13.
+
+## Not done / known limits
+
+- No load test, so no measured claim about throughput or behavior under load.
+- Observability (structured logging, metrics) and presence are not built.
+- Prometheus/Grafana and Kubernetes are out of scope for this project.
+
+## Next
+
+1. Confirm `.env` files are gitignored and not in the diff; add `.env.example`.
+2. Push code, merge branches into `main`.
+3. Confirm Render and Vercel did not redeploy (live site stays on `stable-v2`).
+4. Dedicated README day: architecture, E2EE, scaling, honest limitations.
