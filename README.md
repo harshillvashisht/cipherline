@@ -1,4 +1,4 @@
-# Chat App
+# Cipherline
 
 A real-time, one-to-one messaging application with end-to-end encrypted text messages, idempotent/retry-safe message delivery, and a horizontally scaled backend (multiple instances behind Nginx, coordinated over Redis).
 
